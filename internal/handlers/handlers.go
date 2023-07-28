@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"fmt"
 	"log"
 	"net/http"
+	"sort"
 
 	"github.com/CloudyKit/jet/v6"
 	"github.com/gorilla/websocket"
@@ -36,9 +38,10 @@ type WebStocketConnection struct {
 
 // WsJsonResponse defines the reponse sent back from websocket
 type WsJsonResponse struct {
-	Action      string `json:"action"`
-	Message     string `json:"message"`
-	MessageType string `json:"message_type"`
+	Action         string   `json:"action"`
+	Message        string   `json:"message"`
+	MessageType    string   `json:"message_type"`
+	ConnectedUsers []string `json:"connected_users"`
 }
 
 type WsPayload struct {
@@ -60,10 +63,80 @@ func WsEndpoint(w http.ResponseWriter, r *http.Request) {
 	var response WsJsonResponse
 	response.Message = `<em><small>Connected to server</small></em>`
 
+	conn := WebStocketConnection{Conn: ws}
+	clients[conn] = ""
+
 	err = ws.WriteJSON(response)
 	if err != nil {
 		log.Println(err)
 	}
+
+	go ListenForWs(&conn) // somebody connects and starts this go routine and runs forever
+}
+
+func ListenToWsChannel() {
+	var response WsJsonResponse
+
+	for {
+		e := <-wsChan
+
+		switch e.Action {
+		case "username":
+			// get a list of all users and send it back via broadcast
+			clients[e.Conn] = e.Username
+			users := getUserList()
+			response.Action = "list_users"
+			response.ConnectedUsers = users
+			broadCastToAll(response)
+		}
+
+		/*
+			response.Action = "Got here"
+			response.Message = fmt.Sprintf("Some msg and action was %s", e.Action)
+			broadCastToAll(response)
+		*/
+	}
+}
+
+func getUserList() []string {
+	var userList []string
+	for _, x := range clients {
+		userList = append(userList, x)
+	}
+
+	sort.Strings(userList)
+	return userList
+}
+
+func broadCastToAll(response WsJsonResponse) {
+	for client := range clients {
+		err := client.WriteJSON(response)
+		if err != nil {
+			log.Println("Websocket err")
+			_ = client.Close()
+			delete(clients, client)
+		}
+	}
+}
+
+func ListenForWs(conn *WebStocketConnection) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println("Error:", fmt.Sprintf("%v", r))
+		}
+
+		var payLoad WsPayload
+
+		for {
+			err := conn.ReadJSON(&payLoad)
+			if err != nil {
+				// do nothing
+			} else {
+				payLoad.Conn = *conn
+				wsChan <- payLoad
+			}
+		}
+	}()
 }
 
 func renderPage(w http.ResponseWriter, tmpl string, data jet.VarMap) error {
